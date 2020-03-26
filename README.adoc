@@ -7,4 +7,6 @@ WORK IN PROGRESS
 
 == TOOD
 
-Usage
+- Usage
+- Test
+- Add rest of workouts
