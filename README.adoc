@@ -1,0 +1,10 @@
+= Zwift Workout Creator
+
+Create your workouts quick and easily for Zwift
+Used to create workouts for Coach Rob Manning's training plans at https://tailwind-coaching.com/
+
+WORK IN PROGRESS
+
+== TOOD
+
+Usage
