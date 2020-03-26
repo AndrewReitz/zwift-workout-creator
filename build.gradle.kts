@@ -17,3 +17,7 @@ dependencies {
 application {
     mainClassName = "andrew.cash.zwift.AppKt"
 }
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+    kotlinOptions.jvmTarget = "1.8"
+}
