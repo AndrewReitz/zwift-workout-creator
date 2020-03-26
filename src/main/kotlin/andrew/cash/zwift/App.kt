@@ -88,7 +88,7 @@ fun workout(name: String, author: String, restpower: Int, exercise: List<Exercis
 
 @ExperimentalTime
 private fun createFtpInterval(workouts: andrew.cash.zwift.xml.Workout, exercise: FTPInterval, defaultRest: SteadyState): andrew.cash.zwift.xml.Workout {
-    return workouts.copy(steadyState = workouts.steadyState + (0..exercise.sets).map {
+    return workouts.copy(steadyState = workouts.steadyState + List(exercise.sets) {
         listOf(
                 SteadyState(duration = exercise.duration.toXmlSeconds(), cadence = exercise.cadence, power = exercise.power.toXmlPower()),
                 defaultRest.copy(duration = exercise.rest.toXmlSeconds())
@@ -101,7 +101,7 @@ private fun createFatBurner(exercise: FatBurner, defaultRest: SteadyState, worko
     val vo2 = defaultFatBurner.copy(power = exercise.power.toXmlPower())
     val rest = defaultRest.copy(duration = exercise.rest.toXmlSeconds())
     return workouts.copy(
-            steadyState = workouts.steadyState + (1..exercise.sets).map {
+            steadyState = workouts.steadyState + List(exercise.sets) {
                 listOf(vo2, rest)
             }.flatten()
     )
@@ -109,7 +109,7 @@ private fun createFatBurner(exercise: FatBurner, defaultRest: SteadyState, worko
 
 @ExperimentalTime
 private fun createVO2(workouts: andrew.cash.zwift.xml.Workout, exercise: VO2, defaultRest: SteadyState) = workouts.copy(
-        steadyState = workouts.steadyState + (1..exercise.sets).map {
+        steadyState = workouts.steadyState + List(exercise.sets) {
             listOf(
                     SteadyState(duration = exercise.duration.inSeconds.toInt(), power = exercise.power.toXmlPower()),
                     defaultRest.copy(duration = exercise.rest.toXmlSeconds())
