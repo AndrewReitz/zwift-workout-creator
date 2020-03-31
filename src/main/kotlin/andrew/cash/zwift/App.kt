@@ -1,137 +1,240 @@
 package andrew.cash.zwift
 
-import andrew.cash.zwift.input.*
-import andrew.cash.zwift.xml.*
+import andrew.cash.zwift.input.CadenceLadder
+import andrew.cash.zwift.input.CoolDown
+import andrew.cash.zwift.input.Custom
+import andrew.cash.zwift.input.Exercise
+import andrew.cash.zwift.input.FTPInterval
+import andrew.cash.zwift.input.FatBurner
+import andrew.cash.zwift.input.SingleLeg
+import andrew.cash.zwift.input.VO2
+import andrew.cash.zwift.input.WarmUp
+import andrew.cash.zwift.input.Workout
+import andrew.cash.zwift.input.Z5R
+import andrew.cash.zwift.xml.SteadyState
+import andrew.cash.zwift.xml.TextEvent
+import andrew.cash.zwift.xml.WorkoutFile
+import andrew.cash.zwift.xml.defaultFatBurner
+import andrew.cash.zwift.xml.textEvents
+import andrew.cash.zwift.xml.toXml
+import andrew.cash.zwift.xml.toXmlPower
+import andrew.cash.zwift.xml.toXmlSeconds
 import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
-import java.io.File
+import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.output.TermUi
+import com.github.ajalt.clikt.parameters.arguments.argument
+import com.github.ajalt.clikt.parameters.arguments.optional
+import com.github.ajalt.clikt.parameters.options.flag
+import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.types.path
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.Paths
-import javax.script.ScriptEngine
-import javax.script.ScriptEngineManager
-import javax.script.ScriptException
+import kotlin.script.experimental.api.ScriptAcceptedLocation
+import kotlin.script.experimental.api.ScriptDiagnostic
+import kotlin.script.experimental.api.SourceCode
+import kotlin.script.experimental.api.acceptedLocations
+import kotlin.script.experimental.api.compilerOptions
+import kotlin.script.experimental.api.defaultImports
+import kotlin.script.experimental.api.ide
+import kotlin.script.experimental.host.toScriptSource
+import kotlin.script.experimental.jvm.dependenciesFromCurrentContext
+import kotlin.script.experimental.jvm.jvm
+import kotlin.script.experimental.jvmhost.BasicJvmScriptingHost
+import kotlin.script.experimental.jvmhost.createJvmCompilationConfigurationFromTemplate
 import kotlin.time.ExperimentalTime
-import andrew.cash.zwift.xml.Workout as XmlWorkout
-import andrew.cash.zwift.xml.Cooldown as XmlCooldown
+import andrew.cash.zwift.xml.Exercise as XmlExercise
 
-@ExperimentalTime
-fun main(args: Array<String>) {
-    val input = if (args.isNotEmpty()) Paths.get(args[0]) else {
-        println("usage: createWorkout input [output]")
-        return
-    }
+/** Error writing to the specified output. Display message then terminate. */
+class OutputException(override val message: String) : Exception()
 
-    val output = if (args.size >= 2) Paths.get("", args[2]) else Paths.get("", "workout.zwo")
+class ZwoCreate : CliktCommand() {
 
-    val scriptEngine: ScriptEngine = ScriptEngineManager().getEngineByExtension("main.kts")
-    val scriptText = Files.newBufferedReader(input).use { it.readText().trim() }
+  private val force by option("-f", "--force").flag()
 
-    // todo look into better scripting support to get
-    // line numbers
-    val workout = runCatching {
-        scriptEngine.eval("""
-            @file:CompilerOptions("-Xopt-in=kotlin.time.ExperimentalTime")
-            import andrew.cash.zwift.input.*
-            import andrew.cash.zwift.workout
-            import kotlin.time.*
-    
-            $scriptText
-        """.trimIndent())
-    }.getOrElse {
-        val scriptException = it as ScriptException
-        println("""Error in config script "${input.fileName}"
-            |${it.message}
-        """.trimMargin())
-        return
-    } as Workout
+  private val input: Path by argument()
+    .path(
+      canBeDir = false,
+      mustExist = true,
+      mustBeReadable = true
+    )
 
+  private val _output: Path? by argument(name = "OUTPUT").path().optional()
+  val output: Path
+    get() {
+      val out = _output ?: return Paths.get("", "workout.zwo")
 
-    val description = workout.exercise.joinToString(separator = ", ") { it.name }
-    var workouts = XmlWorkout()
+      val returnValue = when {
+        out.toFile().isDirectory -> out.resolve("workout.zwo")
+        !out.fileName.toString().contains(".zwo") -> out.parent.resolve("${out.fileName}.zwo")
+        else -> out
+      }
 
-    val defaultRest = SteadyState(duration = 0, power = workout.restpower.toXmlPower())
-
-    workout.exercise.forEach { exercise ->
-        workouts = when (exercise) {
-            is WarmUp -> createWarmUp(workouts, exercise)
-            is CoolDown -> createCoolDown(workouts, exercise)
-            is VO2 -> createVO2(workouts, exercise, defaultRest)
-            is FatBurner -> createFatBurner(exercise, defaultRest, workouts)
-            is FTPInterval -> createFtpInterval(workouts, exercise, defaultRest)
+      if (!out.parent.toFile().exists()) {
+        if (force) {
+          if (!out.parent.toFile().mkdirs()) {
+            throw OutputException("Could not create ${out.toAbsolutePath()}")
+          }
+        } else {
+          throw OutputException("Output directory does not exist if \"$commandName\" should create it re-run with -f flag")
         }
+      }
+
+      return returnValue
     }
 
-    val woFile = WorkoutFile(
-            author = workout.author,
-            name = workout.name,
-            description = description,
-            workout = workouts
-    )
-
-    val xmlMapper = XmlMapper().apply {
-        enable(SerializationFeature.INDENT_OUTPUT)
+  override fun run() {
+    val compilationConfiguration = createJvmCompilationConfigurationFromTemplate<ZwoScript>() {
+      jvm {
+        compilerOptions("-Xopt-in=kotlin.time.ExperimentalTime")
+        defaultImports(
+          "andrew.cash.zwift.input.*",
+          "andrew.cash.zwift.input.Z5R.Type.*",
+          "andrew.cash.zwift.Workout",
+          "kotlin.time.*"
+        )
+        dependenciesFromCurrentContext(wholeClasspath = true)
+      }
+      ide {
+        acceptedLocations(ScriptAcceptedLocation.Everywhere)
+      }
     }
 
-    Files.newBufferedWriter(output).use {
-        xmlMapper.writeValue(it, woFile)
+    val result = BasicJvmScriptingHost().eval(input.toFile().toScriptSource(), compilationConfiguration, null)
+
+    result.reports
+      .filter { it.severity == ScriptDiagnostic.Severity.ERROR }
+      .forEach { (message, _, sourcePath, location: SourceCode.Location?, _) ->
+        val sourceFile = Paths.get(requireNotNull(sourcePath))
+        echo("There was an error with script \"${sourceFile.fileName}\" at line ${location?.start?.line}: $message")
+      }
+  }
+}
+
+val zwoCreate = ZwoCreate()
+
+@ExperimentalTime
+fun main(args: Array<String>) = try {
+  zwoCreate.main(args)
+} catch (e: OutputException) {
+  TermUi.echo(
+    message = e.message,
+    err = true
+  )
+}
+
+// Main entry point from script
+@Suppress("FunctionName")
+@ExperimentalTime
+fun Workout(name: String, author: String, restpower: Int, exercise: List<Exercise>) {
+  val workout = Workout(
+    author = author,
+    name = name,
+    restpower = restpower,
+    exercise = exercise
+  )
+
+  val description = workout.exercise.joinToString(separator = ", ") { it.name }
+  val defaultRest = SteadyState(duration = 0, power = workout.restpower.toXmlPower())
+
+  val workouts = mutableListOf<XmlExercise>()
+
+  workout.exercise.forEach { e ->
+    val moreWorkouts: List<XmlExercise> = when (e) {
+      is WarmUp -> listOf(e.toXml())
+      is CoolDown -> listOf(e.toXml())
+      is VO2 -> e.create(defaultRest)
+      is FatBurner -> e.create(defaultRest)
+      is FTPInterval -> e.create(defaultRest)
+      is Z5R -> e.create(defaultRest)
+      is CadenceLadder -> e.toXml()
+      is SingleLeg -> e.create()
+      is Custom -> e.toXml()
     }
-}
 
-// used by kts scripts that are loaded
-@Suppress("unused")
-fun workout(name: String, author: String, restpower: Int, exercise: List<Exercise>) = Workout(
-        author = author,
-        name = name,
-        restpower = restpower,
-        exercise = exercise
-)
+    workouts.addAll(moreWorkouts)
+  }
 
-@ExperimentalTime
-private fun createFtpInterval(workouts: andrew.cash.zwift.xml.Workout, exercise: FTPInterval, defaultRest: SteadyState): andrew.cash.zwift.xml.Workout {
-    return workouts.copy(steadyState = workouts.steadyState + List(exercise.sets) {
-        listOf(
-                SteadyState(duration = exercise.duration.toXmlSeconds(), cadence = exercise.cadence, power = exercise.power.toXmlPower()),
-                defaultRest.copy(duration = exercise.rest.toXmlSeconds())
-        )
-    }.flatten())
-}
+  val woFile = WorkoutFile(
+    author = workout.author,
+    name = workout.name,
+    description = description,
+    workouts = workouts
+  )
 
-@ExperimentalTime
-private fun createFatBurner(exercise: FatBurner, defaultRest: SteadyState, workouts: andrew.cash.zwift.xml.Workout): andrew.cash.zwift.xml.Workout {
-    val vo2 = defaultFatBurner.copy(power = exercise.power.toXmlPower())
-    val rest = defaultRest.copy(duration = exercise.rest.toXmlSeconds())
-    return workouts.copy(
-            steadyState = workouts.steadyState + List(exercise.sets) {
-                listOf(vo2, rest)
-            }.flatten()
-    )
+  val xmlMapper = XmlMapper.builder()
+    .defaultUseWrapper(false)
+    .enable(SerializationFeature.INDENT_OUTPUT)
+    .build()
+
+  Files.newBufferedWriter(zwoCreate.output).use {
+    xmlMapper.writeValue(it, woFile)
+  }
 }
 
 @ExperimentalTime
-private fun createVO2(workouts: andrew.cash.zwift.xml.Workout, exercise: VO2, defaultRest: SteadyState) = workouts.copy(
-        steadyState = workouts.steadyState + List(exercise.sets) {
-            listOf(
-                    SteadyState(duration = exercise.duration.inSeconds.toInt(), power = exercise.power.toXmlPower()),
-                    defaultRest.copy(duration = exercise.rest.toXmlSeconds())
-            )
-        }.flatten()
-)
+private fun FTPInterval.create(
+  defaultRest: SteadyState
+): List<XmlExercise> {
+  val workInterval = SteadyState(
+    duration = duration.toXmlSeconds(),
+    cadence = cadence,
+    power = power.toXmlPower()
+  )
+
+  val restInterval = defaultRest.copy(duration = rest.toXmlSeconds())
+
+  return List(sets) { listOf(workInterval, restInterval) }.flatten()
+}
 
 @ExperimentalTime
-private fun createCoolDown(workouts: andrew.cash.zwift.xml.Workout, exercise: CoolDown) = workouts.copy(
-        cooldown = XmlCooldown(
-                Duration = exercise.duration.toXmlSeconds(),
-                PowerLow = exercise.powerLow,
-                PowerHigh = exercise.powerHigh
-        )
-)
+private fun FatBurner.create(
+  defaultRest: SteadyState
+): List<XmlExercise> {
+  val workInterval = defaultFatBurner.copy(
+    duration = duration.toXmlSeconds(),
+    power = power.toXmlPower()
+  )
+  val restInterval = defaultRest.copy(duration = rest.toXmlSeconds())
+
+  return List(sets) { listOf(workInterval, restInterval) }.flatten()
+}
 
 @ExperimentalTime
-private fun createWarmUp(workouts: andrew.cash.zwift.xml.Workout, warmUp: WarmUp) =
-        workouts.copy(
-                warmup = Warmup(
-                        Duration = warmUp.duration.toXmlSeconds(),
-                        PowerLow = warmUp.powerLow,
-                        PowerHigh = warmUp.powerHigh
-                )
-        )
+private fun VO2.create(defaultRest: SteadyState): List<XmlExercise> {
+  val workInterval = SteadyState(
+    duration = duration.inSeconds.toInt(),
+    power = power.toXmlPower(),
+    cadence = cadence
+  )
+  val restInterval = defaultRest.copy(duration = rest.toXmlSeconds())
+
+  return List(sets) { listOf(workInterval, restInterval) }.flatten()
+}
+
+@ExperimentalTime
+private fun Z5R.create(
+  defaultRest: SteadyState
+): List<XmlExercise> {
+  val workInterval = SteadyState(
+    power = power.toXmlPower(),
+    textEvent = textEvents(),
+    duration = duration.toXmlSeconds()
+  )
+  val restInterval = defaultRest.copy(duration = duration.toXmlSeconds())
+
+  return List(sets) { listOf(workInterval, restInterval) }.flatten()
+}
+
+@ExperimentalTime
+private fun SingleLeg.create(): List<XmlExercise> {
+  val rightLeg = SteadyState(
+    duration = duration.toXmlSeconds() / 2,
+    cadence = cadence,
+    power = power.toXmlPower(),
+    textEvent = listOf(TextEvent(0, "Right Leg"))
+  )
+  val leftLeg = rightLeg.copy(textEvent = listOf(TextEvent(0, "Light Leg")))
+  return  List(sets) { listOf(rightLeg, leftLeg) }.flatten()
+}
